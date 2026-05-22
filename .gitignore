@@ -227,6 +227,27 @@ dist/
 # Docker
 docker/
 
-# AI datasets, runs and trained weights (regenerated locally)
-backend/ai/datasets/
-backend/ai/runs/
+# AI datasets (regenerated locally)
+ai/datasets/
+
+# AI runs - ignore everything except trained weights
+ai/runs/*
+!ai/runs/detect/
+ai/runs/detect/*
+!ai/runs/detect/train/
+ai/runs/detect/train/*
+!ai/runs/detect/train/weights/
+ai/runs/detect/train/weights/*
+!ai/runs/detect/train/weights/best.pt
+!ai/runs/detect/train/weights/last.pt
+
+# HLS streaming segments
+streaming/hls/
+
+# Virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# Temp
+temp/
