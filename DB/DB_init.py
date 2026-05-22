@@ -112,8 +112,8 @@ def _load_env_file(env_path: Path) -> None:
 def _load_environment() -> None:
 	project_root = Path(__file__).resolve().parents[2]
 	_load_env_file(project_root / ".env")
-	_load_env_file(project_root / "backend" / ".env")
-	_load_env_file(project_root / "backend" / "DB" / ".env")
+	_load_env_file(project_root / "BeeAware-BackEnd" / ".env")
+	_load_env_file(project_root / "BeeAware-BackEnd" / "DB" / ".env")
 
 
 def _read_database_url(database_url: str) -> PostgresSettings:
@@ -173,7 +173,7 @@ def get_connection() -> Iterator[psycopg2.extensions.connection]:
 			"PostgreSQL connection failed: the server locale is set to Windows-1252 (French) but "
 			"psycopg2 expects UTF-8. This usually means the password is wrong.\n\n"
 			"If you forgot your PostgreSQL password, run as Administrator:\n"
-			"  powershell -ExecutionPolicy Bypass -File backend/reset_pg_password.ps1\n\n"
+			"  powershell -ExecutionPolicy Bypass -File BeeAware-BackEnd/reset_pg_password.ps1\n\n"
 			"Original error: " + str(ude)
 		)
 		raise RuntimeError(hint) from ude

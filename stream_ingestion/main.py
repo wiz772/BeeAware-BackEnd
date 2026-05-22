@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dispatcher import Dispatcher
-from backend.ai.analyzer import get_analyzer
+from ai.analyzer import get_analyzer
 
 DEFAULT_URLS = ["rtsp://localhost:554/live"]
 
@@ -63,7 +63,7 @@ def get_database_repository():
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
 
-        from backend.DB.DB_init import get_database_repository as pg_get_db
+        from DB.DB_init import get_database_repository as pg_get_db
 
         repo = pg_get_db()
         if repo is not None:

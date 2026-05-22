@@ -14,12 +14,12 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import bcrypt
 from jose import jwt, JWTError
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from backend.DB.DB_init import get_database_repository
-from backend.streaming.stream_manager import start_stream, stop_stream, stop_all, get_active_streams, HLS_DIR
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from DB.DB_init import get_database_repository
+from streaming.stream_manager import start_stream, stop_stream, stop_all, get_active_streams, HLS_DIR
 
-from backend.ai.analyzer import get_analyzer
-from backend.stream_ingestion.main import Dispatcher, make_detection_handler
+from ai.analyzer import get_analyzer
+from stream_ingestion.main import Dispatcher, make_detection_handler
 
 app = FastAPI(title="BeeAware API", version="1.0.0")
 
@@ -216,7 +216,7 @@ def add_camera(name: str = Query(...), rtsp_url: str = Query(...), username: str
 @app.post("/cameras/test")
 def test_camera(rtsp_url: str = Query(...), _user: str = Depends(get_utilisateur_actuel)):
     import subprocess
-    from backend.streaming.stream_manager import FFMPEG_PATH
+    from streaming.stream_manager import FFMPEG_PATH
     ffprobe = FFMPEG_PATH.replace("ffmpeg", "ffprobe") if FFMPEG_PATH else "ffprobe"
     try:
         result = subprocess.run(
@@ -340,7 +340,7 @@ def shutdown():
 @app.post("/predict")
 async def predict(file: UploadFile = File(...), user: str = Depends(get_utilisateur_actuel)):
     try:
-        from backend.ai.analyzer import get_analyzer
+        from ai.analyzer import get_analyzer
         analyzer = get_analyzer()
         contents = await file.read()
         temp_dir = Path("temp")
