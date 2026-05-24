@@ -54,6 +54,8 @@ CREATE INDEX IF NOT EXISTS idx_cameras_rtsp_url ON cameras (rtsp_url);
 CREATE INDEX IF NOT EXISTS idx_detections_camera_id ON detections (camera_id);
 
 ALTER TABLE detections ADD COLUMN IF NOT EXISTS snapshot_path VARCHAR(1024) NULL;
+ALTER TABLE cameras ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_read_at TIMESTAMPTZ NULL;
 """
 
 
@@ -219,14 +221,14 @@ class PostgresCameraRepository:
 			with connection.cursor() as cursor:
 				cursor.execute(
 					"""
-					SELECT id, name, rtsp_url, status
-					FROM cameras
-					WHERE COALESCE(status, 'active') = 'active'
-					ORDER BY created_at ASC
+					SELECT c.id, c.name, c.rtsp_url, c.status, c.user_id
+					FROM cameras c
+					WHERE COALESCE(c.status, 'active') = 'active'
+					ORDER BY c.created_at ASC
 					"""
 				)
 				return [
-					{"id": str(row[0]), "name": row[1] or "Caméra sans nom", "rtsp_url": row[2], "status": "online"}
+					{"id": str(row[0]), "name": row[1] or "Caméra sans nom", "rtsp_url": row[2], "status": "online", "user_id": str(row[3]) if row[3] else None}
 					for row in cursor.fetchall()
 				]
 
@@ -235,7 +237,7 @@ class PostgresCameraRepository:
 			with connection.cursor() as cursor:
 				cursor.execute(
 					"""
-					SELECT id, name, rtsp_url, status
+					SELECT id, name, rtsp_url, status, user_id
 					FROM cameras
 					WHERE id = %s
 					""",
@@ -244,40 +246,64 @@ class PostgresCameraRepository:
 				row = cursor.fetchone()
 				if not row:
 					return None
-				return {"id": str(row[0]), "name": row[1] or "Caméra sans nom", "rtsp_url": row[2], "status": "online"}
+				return {"id": str(row[0]), "name": row[1] or "Caméra sans nom", "rtsp_url": row[2], "status": "online", "user_id": str(row[3]) if row[3] else None}
 
-	def add_camera(self, name: str, url: str, cam_id: str = None):
+	def add_camera(self, name: str, url: str, cam_id: str = None, user_id: Optional[str] = None):
 		with get_connection() as connection:
 			with connection.cursor() as cursor:
 				if cam_id:
 					cursor.execute(
 						"""
-						INSERT INTO cameras (id, name, rtsp_url, status)
-						VALUES (%s::uuid, %s, %s, 'active')
+						INSERT INTO cameras (id, name, rtsp_url, status, user_id)
+						VALUES (%s::uuid, %s, %s, 'active', %s::uuid)
 						ON CONFLICT (rtsp_url)
 						DO UPDATE SET
 							name = COALESCE(%s, cameras.name),
 							status = 'active'
 						RETURNING id
 						""",
-						(cam_id, name, url, name),
+						(cam_id, name, url, user_id, name),
 					)
 				else:
 					cursor.execute(
 						"""
-						INSERT INTO cameras (name, rtsp_url, status)
-						VALUES (%s, %s, 'active')
+						INSERT INTO cameras (name, rtsp_url, status, user_id)
+						VALUES (%s, %s, 'active', %s::uuid)
 						ON CONFLICT (rtsp_url)
 						DO UPDATE SET
 							name = COALESCE(%s, cameras.name),
 							status = 'active'
 						RETURNING id
 						""",
-						(name, url, name),
+						(name, url, user_id, name),
 					)
 				row = cursor.fetchone()
 			connection.commit()
 		return str(row[0]) if row else None
+
+	def get_all_cameras(self):
+		with get_connection() as connection:
+			with connection.cursor() as cursor:
+				cursor.execute(
+					"""
+					SELECT c.id, c.name, c.rtsp_url, c.status, c.created_at, c.user_id, u.email as user_email
+					FROM cameras c
+					LEFT JOIN users u ON u.id = c.user_id
+					ORDER BY c.created_at DESC
+					"""
+				)
+				return [
+					{
+						"id": str(row[0]),
+						"name": row[1] or "Sans nom",
+						"rtsp_url": row[2],
+						"status": row[3] or "inactive",
+						"created_at": row[4].isoformat() if row[4] else None,
+						"user_id": str(row[5]) if row[5] else None,
+						"user_email": row[6],
+					}
+					for row in cursor.fetchall()
+				]
 
 
 class PostgresRepository(PostgresCameraRepository):
@@ -359,12 +385,43 @@ class PostgresRepository(PostgresCameraRepository):
 					cursor.execute("DELETE FROM detections")
 			connection.commit()
 
+	def admin_delete_user(self, user_id: str):
+		with get_connection() as connection:
+			with connection.cursor() as cursor:
+				cursor.execute("DELETE FROM cameras WHERE user_id = %s", (user_id,))
+				cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+			connection.commit()
+
+	def admin_delete_camera(self, camera_id: str):
+		with get_connection() as connection:
+			with connection.cursor() as cursor:
+				cursor.execute("DELETE FROM cameras WHERE id = %s", (camera_id,))
+			connection.commit()
+
+	def admin_delete_detection(self, detection_id: str):
+		with get_connection() as connection:
+			with connection.cursor() as cursor:
+				cursor.execute("DELETE FROM detections WHERE id = %s", (detection_id,))
+			connection.commit()
+
+	def mark_notifications_read(self, email: str):
+		with get_connection() as connection:
+			with connection.cursor() as cursor:
+				cursor.execute(
+					"""
+					UPDATE users SET notifications_read_at = NOW()
+					WHERE email = %s
+					""",
+					(email,)
+				)
+			connection.commit()
+
 	def get_user_by_email(self, email: str):
 		with get_connection() as connection:
 			with connection.cursor() as cursor:
 				cursor.execute(
 					"""
-					SELECT id, email, password_hash, first_name, last_name, ui_theme, is_active, created_at
+					SELECT id, email, password_hash, first_name, last_name, ui_theme, is_active, created_at, notifications_read_at
 					FROM users
 					WHERE email = %s
 					""",
@@ -382,9 +439,30 @@ class PostgresRepository(PostgresCameraRepository):
 					"ui_theme": row[5],
 					"is_active": row[6],
 					"created_at": row[7],
+					"notifications_read_at": row[8].isoformat() if row[8] else None,
 				}
 
-
+	def get_all_users(self):
+		with get_connection() as connection:
+			with connection.cursor() as cursor:
+				cursor.execute(
+					"""
+					SELECT id, email, first_name, last_name, is_active, created_at
+					FROM users
+					ORDER BY created_at DESC
+					"""
+				)
+				return [
+					{
+						"id": str(row[0]),
+						"email": row[1],
+						"first_name": row[2],
+						"last_name": row[3],
+						"is_active": row[4],
+						"created_at": row[5].isoformat() if row[5] else None,
+					}
+					for row in cursor.fetchall()
+				]
 def get_database_repository() -> Optional[PostgresCameraRepository]:
 	try:
 		initialize_database()

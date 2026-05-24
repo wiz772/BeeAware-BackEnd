@@ -5,7 +5,7 @@ import random
 import sys
 import threading
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -31,7 +31,7 @@ hls_mount_path = str(HLS_DIR.resolve())
 if Path(hls_mount_path).exists():
     app.mount("/hls", StaticFiles(directory=hls_mount_path), name="hls")
 
-def _enrich_camera(cam: dict) -> dict:
+def _enrich_camera(cam: dict, user_email: str | None = None) -> dict:
     """Add alert / detection fields from DB to a camera dict."""
     cam["lastDetection"] = None
     cam["detectionsToday"] = 0
@@ -43,10 +43,23 @@ def _enrich_camera(cam: dict) -> dict:
     cam["connection"] = cam.get("rtsp_url") or cam.get("url")
     if use_db:
         try:
+            notifications_read_at = None
+            if user_email:
+                user = repository.get_user_by_email(user_email)
+                if user and user.get("notifications_read_at"):
+                    notifications_read_at = datetime.fromisoformat(user["notifications_read_at"])
+
             dets = repository.get_detections(camera_id=cam.get("id"), limit=1)
             if dets:
                 cam["lastDetection"] = dets[0]["detected_at"]
-                cam["alert"] = True
+                if notifications_read_at:
+                    d_time = datetime.fromisoformat(dets[0]["detected_at"])
+                    if d_time.tzinfo is None:
+                        d_time = d_time.replace(tzinfo=timezone.utc)
+                    if d_time > notifications_read_at:
+                        cam["alert"] = True
+                else:
+                    cam["alert"] = True
                 cam["confidence"] = dets[0]["confidence_score"]
             today_dets = repository.get_detections(camera_id=cam.get("id"), limit=1000)
             today_str = datetime.utcnow().strftime("%Y-%m-%d")
@@ -134,58 +147,18 @@ def startup_ai():
     except Exception as e:
         print(f"[WARN] AI ingestion not available: {e}")
 
-    # Fake detection every 5 minutes for demo
-    def _fake_detection_loop():
-        while True:
-            threading.Event().wait(300)  # 5 minutes
-            if not use_db:
-                continue
-            try:
-                cameras = repository.get_all_active_cameras()
-                if not cameras:
-                    continue
-                cam = random.choice(cameras)
-                cam_id = cam["id"]
-                conf = round(random.uniform(0.75, 0.99), 2)
-                count = random.randint(1, 3)
-                now_ts = datetime.utcnow()
-                snap_filename = f"{int(now_ts.timestamp())}.jpg"
-                snap_dir = Path("snapshots") / str(cam_id)
-                snap_dir.mkdir(parents=True, exist_ok=True)
-                snap_path = str(snap_dir / snap_filename)
-                # Create a placeholder snapshot so the frontend shows something
-                try:
-                    import cv2
-                    import numpy as np
-                    h, w = 480, 640
-                    img = np.zeros((h, w, 3), dtype=np.uint8)
-                    img[:] = (30, 30, 30)
-                    cv2.putText(img, "HORNET SIMULE", (w // 2 - 140, h // 2 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-                    cv2.putText(img, f"conf: {conf:.0%}", (w // 2 - 80, h // 2 + 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    cv2.rectangle(img, (w // 2 - 60, h // 2 - 60),
-                                  (w // 2 + 60, h // 2 + 60), (0, 0, 255), 3)
-                    cv2.imwrite(snap_path, img)
-                    cv2.imwrite(str(snap_dir / "latest.jpg"), img)
-                except Exception:
-                    snap_path = None
-                repository.add_detection(
-                    camera_id=cam_id,
-                    reviewed_by=None,
-                    hornet_count=count,
-                    confidence_score=conf,
-                    is_false_positive=False,
-                    detected_at=now_ts.isoformat(),
-                    snapshot_path=snap_path,
-                )
-                print(f"[FAKE] Detection ajoutée pour {cam_id} ({count} frelon(s), {conf:.0%})")
-            except Exception as e:
-                print(f"[FAKE] Erreur: {e}")
-
-    t = threading.Thread(target=_fake_detection_loop, daemon=True)
-    t.start()
-    print("[INFO] Fausses détections toutes les 5 minutes activées")
+    # Ensure admin user exists
+    if use_db:
+        try:
+            existing = repository.get_user_by_email("admin@beeware.io")
+            if not existing:
+                hashed = bcrypt.hashpw("admin1234".encode(), bcrypt.gensalt()).decode()
+                repository.create_user("admin@beeware.io", hashed, first_name="Admin", last_name="BeeAware")
+                print("[INFO] Admin user created (admin@beeware.io / admin1234)")
+            else:
+                print("[INFO] Admin user already exists")
+        except Exception as e:
+            print(f"[WARN] Failed to create admin user: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -249,7 +222,7 @@ def list_cameras(user: str = Depends(get_utilisateur_actuel)):
     if use_db:
         try:
             rows = repository.get_all_active_cameras()
-            return [_enrich_camera(dict(r)) for r in rows]
+            return [_enrich_camera(dict(r), user_email=user) for r in rows]
         except Exception:
             pass
     return _in_memory_cameras
@@ -261,13 +234,13 @@ def get_camera(camera_id: str, user: str = Depends(get_utilisateur_actuel)):
         try:
             cam = repository.get_camera_by_id(camera_id)
             if cam:
-                return _enrich_camera(dict(cam))
+                return _enrich_camera(dict(cam), user_email=user)
         except Exception:
             pass
     cam = next((c for c in _in_memory_cameras if c["id"] == camera_id), None)
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
-    return _enrich_camera(dict(cam))
+    return _enrich_camera(dict(cam), user_email=user)
 
 
 @app.post("/cameras")
@@ -281,7 +254,9 @@ def add_camera(name: str = Query(...), rtsp_url: str = Query(...), username: str
     }
     if use_db:
         try:
-            db_cam_id = repository.add_camera(name, rtsp_url, cam_id)
+            user_data = repository.get_user_by_email(_user)
+            user_id = str(user_data["id"]) if user_data else None
+            db_cam_id = repository.add_camera(name, rtsp_url, cam_id, user_id=user_id)
             if db_cam_id:
                 cam_id = str(db_cam_id)
                 new_cam["id"] = cam_id
@@ -442,15 +417,93 @@ def get_stats(user: str = Depends(get_utilisateur_actuel)):
         avg_confidence = round(sum(confidences) / len(confidences), 2) if confidences else 0
 
     online = sum(1 for c in _in_memory_cameras if c["status"] == "online")
+    total_cams = len(_in_memory_cameras)
+    if use_db:
+        try:
+            all_cams = repository.get_all_cameras()
+            total_cams = len(all_cams)
+            online = sum(1 for c in all_cams if c.get("status") == "active")
+        except Exception:
+            pass
     return {
         "today": today_count,
         "week": total,
         "total": total,
         "confidence": avg_confidence,
         "cameras_online": online,
-        "cameras_total": len(_in_memory_cameras),
+        "cameras_total": total_cams,
         "chart": [],
     }
+
+
+@app.get("/stats/monthly")
+def monthly_stats(user: str = Depends(get_utilisateur_actuel)):
+    if not use_db:
+        return {"days": []}
+    from collections import defaultdict
+    from datetime import timezone
+    import calendar
+    try:
+        rows = repository.get_detections(limit=10000)
+        today = datetime.now(timezone.utc)
+        month_start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        daily = defaultdict(int)
+        for r in rows:
+            if r["detected_at"]:
+                try:
+                    d = datetime.fromisoformat(r["detected_at"])
+                    if d.tzinfo is None:
+                        d = d.replace(tzinfo=timezone.utc)
+                    if d >= month_start:
+                        key = d.strftime("%Y-%m-%d")
+                        daily[key] += r["hornet_count"] or 1
+                except Exception:
+                    pass
+        days = []
+        _, last_day = calendar.monthrange(today.year, today.month)
+        for day in range(1, last_day + 1):
+            key = f"{today.year}-{today.month:02d}-{day:02d}"
+            days.append({"date": key, "count": daily.get(key, 0)})
+        return {"days": days}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/avg-hour")
+def avg_detection_hour(user: str = Depends(get_utilisateur_actuel)):
+    if not use_db:
+        return {"hour": None, "label": "—"}
+    from datetime import timezone
+    from statistics import mean
+    try:
+        rows = repository.get_detections(limit=10000)
+        hours = []
+        for r in rows:
+            if r["detected_at"]:
+                try:
+                    d = datetime.fromisoformat(r["detected_at"])
+                    hours.append(d.hour + d.minute / 60)
+                except Exception:
+                    pass
+        if not hours:
+            return {"hour": None, "label": "—"}
+        avg_h = mean(hours)
+        h = int(avg_h)
+        m = int((avg_h - h) * 60)
+        return {"hour": round(avg_h, 2), "label": f"{h:02d}:{m:02d}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/notifications/read")
+def mark_notifications_read(user: str = Depends(get_utilisateur_actuel)):
+    if use_db:
+        try:
+            repository.mark_notifications_read(user)
+            return {"ok": True}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True}
 
 
 @app.delete("/cameras/{camera_id}")
@@ -530,3 +583,147 @@ async def predict(file: UploadFile = File(...), user: str = Depends(get_utilisat
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+
+
+# ─────────────────────────────────────────────
+# ADMIN ENDPOINTS
+# ─────────────────────────────────────────────
+
+def _require_admin(user: str = Depends(get_utilisateur_actuel)):
+    if user != "admin@beeware.io":
+        raise HTTPException(status_code=403, detail="Accès réservé à l'administrateur")
+    return user
+
+
+@app.get("/admin/users")
+def admin_list_users(admin: str = Depends(_require_admin)):
+    if use_db:
+        try:
+            users = repository.get_all_users()
+            result = []
+            for u in users:
+                cams = repository.get_all_cameras()
+                cam_count = len(cams)
+                dets = repository.get_detections(limit=1000)
+                det_count = len(dets)
+                result.append({
+                    "id": u["id"],
+                    "email": u["email"],
+                    "first_name": u["first_name"],
+                    "last_name": u["last_name"],
+                    "is_active": u["is_active"],
+                    "created_at": u["created_at"],
+                    "cameras_count": cam_count,
+                    "detections_count": det_count,
+                })
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    return {"error": "Database not available"}
+
+
+@app.get("/admin/cameras")
+def admin_list_cameras(admin: str = Depends(_require_admin)):
+    if use_db:
+        try:
+            cams = repository.get_all_cameras()
+            result = []
+            for c in cams:
+                dets = repository.get_detections(camera_id=c["id"], limit=1000)
+                result.append({
+                    "id": c["id"],
+                    "name": c["name"],
+                    "rtsp_url": c["rtsp_url"],
+                    "status": c["status"],
+                    "created_at": c["created_at"],
+                    "detections_count": len(dets),
+                    "user_email": c.get("user_email"),
+                })
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    return {"error": "Database not available"}
+
+
+@app.get("/admin/detections")
+def admin_list_detections(admin: str = Depends(_require_admin)):
+    if use_db:
+        try:
+            rows = repository.get_detections(limit=200)
+            cam_cache = {}
+            result = []
+            for r in rows:
+                cid = r["camera_id"]
+                if cid not in cam_cache:
+                    try:
+                        cam_cache[cid] = repository.get_camera_by_id(cid)
+                    except Exception:
+                        cam_cache[cid] = None
+                cam = cam_cache.get(cid)
+                result.append({
+                    "id": r["id"],
+                    "camera_id": r["camera_id"],
+                    "camera_name": cam["name"] if cam else "Inconnue",
+                    "hornet_count": r["hornet_count"],
+                    "confidence_score": r["confidence_score"],
+                    "detected_at": r["detected_at"],
+                    "snapshot_path": r.get("snapshot_path"),
+                })
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    return {"error": "Database not available"}
+
+
+@app.get("/admin/stats")
+def admin_stats(admin: str = Depends(_require_admin)):
+    if use_db:
+        try:
+            users = repository.get_all_users()
+            cams = repository.get_all_cameras()
+            dets = repository.get_detections(limit=10000)
+            today_str = datetime.utcnow().strftime("%Y-%m-%d")
+            today_dets = sum(1 for d in dets if d["detected_at"] and d["detected_at"].startswith(today_str))
+            return {
+                "total_users": len(users),
+                "total_cameras": len(cams),
+                "total_detections": len(dets),
+                "today_detections": today_dets,
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    return {"error": "Database not available"}
+
+
+@app.delete("/admin/users/{user_id}")
+def admin_delete_user(user_id: str, admin: str = Depends(_require_admin)):
+    if admin == "admin@beeware.io" and user_id:
+        if use_db:
+            try:
+                repository.admin_delete_user(user_id)
+                return {"message": "Utilisateur et ses caméras supprimés"}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=403, detail="Action non autorisée")
+
+
+@app.delete("/admin/cameras/{camera_id}")
+def admin_delete_camera(camera_id: str, admin: str = Depends(_require_admin)):
+    if use_db:
+        try:
+            repository.admin_delete_camera(camera_id)
+            return {"message": "Caméra supprimée"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=403, detail="Action non autorisée")
+
+
+@app.delete("/admin/detections/{detection_id}")
+def admin_delete_detection(detection_id: str, admin: str = Depends(_require_admin)):
+    if use_db:
+        try:
+            repository.admin_delete_detection(detection_id)
+            return {"message": "Détection supprimée"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=403, detail="Action non autorisée")
