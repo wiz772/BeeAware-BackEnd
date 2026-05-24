@@ -75,7 +75,7 @@ def get_database_repository():
 
 
 def make_detection_handler(repository):
-    def on_hornet_detected(camera_id, detection):
+    def on_hornet_detected(camera_id, detection, snapshot_path=None):
         hornet_dets = [d for d in detection["detections"] if d["class"] == 1]
         max_conf = max(d["confidence"] for d in hornet_dets) if hornet_dets else 0
         print(f"  -> Saving detection: {len(hornet_dets)} hornet(s), confidence={max_conf:.2f}")
@@ -89,6 +89,7 @@ def make_detection_handler(repository):
                     confidence_score=max_conf,
                     is_false_positive=False,
                     detected_at=datetime.now(timezone.utc).isoformat(),
+                    snapshot_path=snapshot_path,
                 )
             except Exception as e:
                 print(f"  [ERROR] Failed to save detection: {e}")

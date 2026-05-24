@@ -2,6 +2,7 @@ import cv2
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 class CameraWorker:
@@ -24,6 +25,8 @@ class CameraWorker:
         self.last_time = 0
         self._stop = threading.Event()
         self.is_dead = False
+        self._last_hornet_alert = 0.0
+        self._alert_cooldown = 300  # 5 minutes
 
     def connect(self):
         if self.fake:
@@ -74,16 +77,49 @@ class CameraWorker:
             print(f"[ERROR] AI inference failed on {self.url}: {e}")
             return
 
-        if self.analyzer.has_hornet(result, min_confidence=0.3):
-            print(f"[ALERT] Hornet detected on {self.url}")
-            if self.on_hornet_detected and self.camera_id:
-                try:
-                    self.on_hornet_detected(
-                        camera_id=self.camera_id,
-                        detection=result,
-                    )
-                except Exception as e:
-                    print(f"[ERROR] Detection handler failed for {self.url}: {e}")
+        hornet_detected = self.analyzer.has_hornet(result, min_confidence=0.3)
+
+        if hornet_detected:
+            now = time.time()
+
+            # Always draw bounding boxes and save snapshot (keeps overlay up to date)
+            annotated = frame.copy()
+            for det in result["detections"]:
+                if det["class"] == 1 and det["confidence"] >= 0.3:
+                    x1, y1, x2, y2 = [int(v) for v in det["coords"]]
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                    label = f"Hornet {det['confidence']:.0%}"
+                    cv2.putText(annotated, label, (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+            if self.camera_id:
+                snap_dir = Path("snapshots") / str(self.camera_id)
+                snap_dir.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(snap_dir / "latest.jpg"), annotated)
+
+            # Only save to DB once per cooldown to avoid duplicates
+            if now - self._last_hornet_alert >= self._alert_cooldown:
+                self._last_hornet_alert = now
+                print(f"[ALERT] Hornet detected on {self.url}")
+
+                snap_filename = f"{int(now)}.jpg"
+                snap_path = None
+                if self.camera_id:
+                    snap_dir = Path("snapshots") / str(self.camera_id)
+                    snap_dir.mkdir(parents=True, exist_ok=True)
+                    unique_path = snap_dir / snap_filename
+                    cv2.imwrite(str(unique_path), annotated)
+                    snap_path = str(unique_path)
+
+                if self.on_hornet_detected and self.camera_id:
+                    try:
+                        self.on_hornet_detected(
+                            camera_id=self.camera_id,
+                            detection=result,
+                            snapshot_path=snap_path,
+                        )
+                    except Exception as e:
+                        print(f"[ERROR] Detection handler failed for {self.url}: {e}")
 
     def stop(self):
         self._stop.set()

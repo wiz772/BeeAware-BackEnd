@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS detections (
 
 CREATE INDEX IF NOT EXISTS idx_cameras_rtsp_url ON cameras (rtsp_url);
 CREATE INDEX IF NOT EXISTS idx_detections_camera_id ON detections (camera_id);
+
+ALTER TABLE detections ADD COLUMN IF NOT EXISTS snapshot_path VARCHAR(1024) NULL;
 """
 
 
@@ -297,20 +299,65 @@ class PostgresRepository(PostgresCameraRepository):
 			connection.commit()
 		return row[0] if row else None
 
-	def add_detection(self, camera_id: str, reviewed_by: Optional[str], hornet_count: Optional[int], confidence_score: Optional[float], is_false_positive: bool = False, detected_at: Optional[str] = None):
+	def add_detection(self, camera_id: str, reviewed_by: Optional[str], hornet_count: Optional[int], confidence_score: Optional[float], is_false_positive: bool = False, detected_at: Optional[str] = None, snapshot_path: Optional[str] = None):
 		with get_connection() as connection:
 			with connection.cursor() as cursor:
 				cursor.execute(
 					"""
-					INSERT INTO detections (camera_id, reviewed_by, hornet_count, confidence_score, is_false_positive, detected_at)
-					VALUES (%s, %s, %s, %s, %s, COALESCE(%s, NOW()))
+					INSERT INTO detections (camera_id, reviewed_by, hornet_count, confidence_score, is_false_positive, detected_at, snapshot_path)
+					VALUES (%s, %s, %s, %s, %s, COALESCE(%s, NOW()), %s)
 					RETURNING id
 					""",
-					(camera_id, reviewed_by, hornet_count, confidence_score, is_false_positive, detected_at),
+					(camera_id, reviewed_by, hornet_count, confidence_score, is_false_positive, detected_at, snapshot_path),
 				)
 				row = cursor.fetchone()
 			connection.commit()
 		return row[0] if row else None
+
+	def get_detections(self, camera_id: Optional[str] = None, limit: int = 50):
+		with get_connection() as connection:
+			with connection.cursor() as cursor:
+				if camera_id:
+					cursor.execute(
+						"""
+						SELECT d.id, d.camera_id, d.hornet_count, d.confidence_score, d.detected_at, d.snapshot_path
+						FROM detections d
+						WHERE d.camera_id = %s
+						ORDER BY d.detected_at DESC
+						LIMIT %s
+						""",
+						(camera_id, limit),
+					)
+				else:
+					cursor.execute(
+						"""
+						SELECT d.id, d.camera_id, d.hornet_count, d.confidence_score, d.detected_at, d.snapshot_path
+						FROM detections d
+						ORDER BY d.detected_at DESC
+						LIMIT %s
+						""",
+						(limit,),
+					)
+				return [
+					{
+						"id": str(row[0]),
+						"camera_id": str(row[1]),
+						"hornet_count": row[2],
+						"confidence_score": row[3],
+						"detected_at": row[4].isoformat() if row[4] else None,
+						"snapshot_path": row[5],
+					}
+					for row in cursor.fetchall()
+				]
+
+	def clear_detections(self, camera_id: Optional[str] = None):
+		with get_connection() as connection:
+			with connection.cursor() as cursor:
+				if camera_id:
+					cursor.execute("DELETE FROM detections WHERE camera_id = %s", (camera_id,))
+				else:
+					cursor.execute("DELETE FROM detections")
+			connection.commit()
 
 	def get_user_by_email(self, email: str):
 		with get_connection() as connection:
