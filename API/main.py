@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 import random
 import sys
 import threading
 import uuid
+
+logging.getLogger("uvicorn.access").disabled = True
+logging.getLogger("uvicorn").setLevel(logging.WARNING)
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
