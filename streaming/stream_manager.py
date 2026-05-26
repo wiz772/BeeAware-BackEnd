@@ -6,6 +6,16 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+
+def _log_stderr(camera_id: str, stream) -> None:
+    """Read and log FFmpeg stderr asynchronously."""
+    try:
+        for line in iter(stream.readline, ""):
+            if line:
+                print(f"[FFMPEG:{camera_id[:8]}] {line.rstrip()}")
+    except Exception:
+        pass
+
 HLS_DIR = Path(__file__).parent / "hls"
 HLS_DIR.mkdir(exist_ok=True)
 
@@ -32,10 +42,21 @@ for c in _ffmpeg_candidates:
 _processes: dict[str, subprocess.Popen] = {}
 
 
+def _normalize_rtsp(url: str) -> str:
+    if url.startswith("rstp://"):
+        corrected = "rtsp://" + url[7:]
+        print(f"[INFO] URL RTSP corrigée : {url} → {corrected}")
+        return corrected
+    return url
+
+
 def start_stream(camera_id: str, rtsp_url: str) -> bool:
     """Start FFmpeg HLS transcoding for a camera."""
     if FFMPEG_PATH is None:
+        print("[ERROR] FFmpeg introuvable. Vérifie l'installation ou le chemin.")
         return False
+
+    rtsp_url = _normalize_rtsp(rtsp_url)
 
     stop_stream(camera_id)
 
@@ -70,16 +91,22 @@ def start_stream(camera_id: str, rtsp_url: str) -> bool:
         str(playlist),
     ]
 
+    print(f"[INFO] Démarrage du streaming HLS pour {camera_id}")
+
     try:
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
         )
         _processes[camera_id] = proc
+        # Log FFmpeg errors asynchronously
+        t = threading.Thread(target=_log_stderr, args=(camera_id, proc.stderr), daemon=True)
+        t.start()
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] FFmpeg n'a pas pu démarrer pour {rtsp_url} : {e}")
         return False
 
 

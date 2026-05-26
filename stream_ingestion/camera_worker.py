@@ -7,7 +7,7 @@ from pathlib import Path
 
 class CameraWorker:
     def __init__(self, url, fps=1, max_retry=5, retry_delay=2, camera_id=None, analyzer=None, on_hornet_detected=None):
-        self.url = url
+        self.url = self._normalize_url(url)
         self.fps = fps
         self.max_retry = max_retry
         self.retry_delay = retry_delay
@@ -27,6 +27,14 @@ class CameraWorker:
         self.is_dead = False
         self._last_hornet_alert = 0.0
         self._alert_cooldown = 300  # 5 minutes
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        if url.startswith("rstp://"):
+            corrected = "rtsp://" + url[7:]
+            print(f"[INFO] URL corrigée : {url} → {corrected}")
+            return corrected
+        return url
 
     def connect(self):
         if self.fake:

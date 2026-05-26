@@ -137,17 +137,23 @@ def startup_ai():
         _ai_dispatcher = Dispatcher(analyzer=analyzer, on_hornet_detected=handler)
 
         cameras = repository.get_all_active_cameras() if use_db else _in_memory_cameras
-        started = 0
+        ai_started = 0
+        hls_started = 0
         for cam in cameras:
             cam_id = cam.get("id")
             url = cam.get("rtsp_url")
             if cam_id and url:
                 try:
                     _ai_dispatcher.add_camera(url, camera_id=cam_id)
-                    started += 1
+                    ai_started += 1
                 except Exception as e:
                     print(f"[WARN] AI worker failed for camera {cam_id}: {e}")
-        print(f"[INFO] AI ingestion started for {started}/{len(cameras)} camera(s)")
+                if start_stream(cam_id, url):
+                    hls_started += 1
+                else:
+                    print(f"[WARN] HLS stream failed to start for camera {cam_id}")
+        print(f"[INFO] AI ingestion started for {ai_started}/{len(cameras)} camera(s)")
+        print(f"[INFO] HLS streams started for {hls_started}/{len(cameras)} camera(s)")
     except Exception as e:
         print(f"[WARN] AI ingestion not available: {e}")
 
@@ -247,8 +253,17 @@ def get_camera(camera_id: str, user: str = Depends(get_utilisateur_actuel)):
     return _enrich_camera(dict(cam), user_email=user)
 
 
+def _normalize_rtsp(url: str) -> str:
+    if url.startswith("rstp://"):
+        corrected = "rtsp://" + url[7:]
+        print(f"[INFO] URL RTSP corrigée : {url} → {corrected}")
+        return corrected
+    return url
+
+
 @app.post("/cameras")
 def add_camera(name: str = Query(...), rtsp_url: str = Query(...), username: str = Query(None), password: str = Query(None), _user: str = Depends(get_utilisateur_actuel)):
+    rtsp_url = _normalize_rtsp(rtsp_url)
     cam_id = str(uuid.uuid4())
     new_cam = {
         "id": cam_id, "name": name, "rtsp_url": rtsp_url,
@@ -278,6 +293,7 @@ def add_camera(name: str = Query(...), rtsp_url: str = Query(...), username: str
 
 @app.post("/cameras/test")
 def test_camera(rtsp_url: str = Query(...), _user: str = Depends(get_utilisateur_actuel)):
+    rtsp_url = _normalize_rtsp(rtsp_url)
     import subprocess
     from streaming.stream_manager import FFMPEG_PATH
     ffprobe = FFMPEG_PATH.replace("ffmpeg", "ffprobe") if FFMPEG_PATH else "ffprobe"
